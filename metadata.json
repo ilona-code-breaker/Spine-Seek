@@ -1,0 +1,6 @@
+{
+  "name": "Folio — Literary Connections",
+  "description": "A daily book-themed word-grouping puzzle game inspired by NYT Connections.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
