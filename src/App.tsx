@@ -1,4 +1,3 @@
-import { onAuthStateChanged, signInWithPopup, signOut, User } from 'firebase/auth';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ArchiveModal } from './components/ArchiveModal';
 import { GameBoard } from './components/GameBoard';
@@ -7,14 +6,6 @@ import { Header } from './components/Header';
 import { HowToPlayModal } from './components/HowToPlayModal';
 import { ResultsModal } from './components/ResultsModal';
 import { PUZZLES, TIER_ORDER } from './data/puzzles';
-import {
-  ensureAndSyncUserAccount,
-  saveCloudPuzzleProgress,
-  saveCloudStats,
-  subscribeToUserProgress,
-  subscribeToUserStats,
-} from './lib/cloudSync';
-import { auth, googleProvider } from './lib/firebase';
 import {
   evaluateGuess,
   formatReadableDate,
@@ -38,10 +29,6 @@ export default function App() {
   }, []);
 
   const todayFormatted = useMemo(() => formatReadableDate(), []);
-
-  const [user, setUser] = useState<User | null>(null);
-  const [authLoading, setAuthLoading] = useState(true);
-  const [cloudReady, setCloudReady] = useState(false);
 
   const [activePuzzleId, setActivePuzzleId] = useState<string>(todayPuzzle.id);
   const [progressMap, setProgressMap] = useState<Record<string, PuzzleProgress>>(
@@ -106,124 +93,13 @@ export default function App() {
     }, 2200);
   }, []);
 
-  useEffect(() => {
-    let unsubStats: (() => void) | null = null;
-    let unsubProgress: (() => void) | null = null;
-    let isCancelled = false;
-
-    const unsubscribeAuth = onAuthStateChanged(auth, async (nextUser) => {
-      if (unsubStats) {
-        unsubStats();
-        unsubStats = null;
-      }
-      if (unsubProgress) {
-        unsubProgress();
-        unsubProgress = null;
-      }
-
-      setUser(nextUser);
-      setAuthLoading(false);
-
-      if (!nextUser) {
-        setCloudReady(false);
-        return;
-      }
-
-      try {
-        const synced = await ensureAndSyncUserAccount(
-          nextUser,
-          loadPlayerStats(),
-          loadAllProgress()
-        );
-        if (isCancelled) return;
-
-        setStats(synced.stats);
-        try {
-          window.localStorage.setItem(
-            'folio_connections_stats_v1',
-            JSON.stringify(synced.stats)
-          );
-        } catch {
-          // Ignore storage errors
-        }
-
-        Object.values(synced.progressMap).forEach((prog) => {
-          savePuzzleProgress(prog);
-        });
-        setProgressMap((prev) => ({ ...prev, ...synced.progressMap }));
-        setCloudReady(true);
-
-        unsubStats = subscribeToUserStats(nextUser.uid, (cloudStats) => {
-          setStats(cloudStats);
-          try {
-            window.localStorage.setItem(
-              'folio_connections_stats_v1',
-              JSON.stringify(cloudStats)
-            );
-          } catch {
-            // Ignore storage errors
-          }
-        });
-
-        unsubProgress = subscribeToUserProgress(
-          nextUser.uid,
-          (cloudProgressMap) => {
-            Object.values(cloudProgressMap).forEach((prog) => {
-              savePuzzleProgress(prog);
-            });
-            setProgressMap((prev) => ({ ...prev, ...cloudProgressMap }));
-          }
-        );
-      } catch (error) {
-        console.error('Failed to sync user account:', error);
-      }
-    });
-
-    return () => {
-      isCancelled = true;
-      unsubscribeAuth();
-      if (unsubStats) unsubStats();
-      if (unsubProgress) unsubProgress();
-    };
+  const updateActiveProgress = useCallback((next: PuzzleProgress) => {
+    savePuzzleProgress(next);
+    setProgressMap((prev) => ({
+      ...prev,
+      [next.puzzleId]: next,
+    }));
   }, []);
-
-  const handleSignIn = useCallback(async () => {
-    try {
-      await signInWithPopup(auth, googleProvider);
-      showToast('Signed in with Google');
-    } catch (error: unknown) {
-      const code =
-        error && typeof error === 'object' && 'code' in error
-          ? String((error as { code?: unknown }).code)
-          : '';
-      if (code !== 'auth/popup-closed-by-user' && code !== 'auth/cancelled-popup-request') {
-        showToast('Sign-in could not be completed');
-      }
-    }
-  }, [showToast]);
-
-  const handleSignOut = useCallback(async () => {
-    try {
-      await signOut(auth);
-      showToast('Signed out');
-    } catch {
-      showToast('Could not sign out');
-    }
-  }, [showToast]);
-
-  const updateActiveProgress = useCallback(
-    (next: PuzzleProgress, cloudAction?: 'shuffle' | 'submit') => {
-      savePuzzleProgress(next);
-      setProgressMap((prev) => ({
-        ...prev,
-        [next.puzzleId]: next,
-      }));
-      if (user && cloudReady && cloudAction) {
-        void saveCloudPuzzleProgress(user.uid, next, cloudAction);
-      }
-    },
-    [user, cloudReady]
-  );
 
   const handleSelectPuzzle = useCallback(
     (puzzleId: string) => {
@@ -265,14 +141,11 @@ export default function App() {
   const handleShuffle = useCallback(() => {
     if (activeProgress.status !== 'playing') return;
     const shuffledOrder = shuffleArray(activeProgress.tileOrder);
-    updateActiveProgress(
-      {
-        ...activeProgress,
-        tileOrder: shuffledOrder,
-        updatedAt: Date.now(),
-      },
-      'shuffle'
-    );
+    updateActiveProgress({
+      ...activeProgress,
+      tileOrder: shuffledOrder,
+      updatedAt: Date.now(),
+    });
   }, [activeProgress, updateActiveProgress]);
 
   const handleDeselectAll = useCallback(() => {
@@ -326,15 +199,12 @@ export default function App() {
         updatedAt: Date.now(),
       };
 
-      updateActiveProgress(nextProgress, 'submit');
+      updateActiveProgress(nextProgress);
       setSelectedTiles([]);
 
       if (isWin) {
         const updatedStats = recordPuzzleCompletion(activePuzzle.id, true);
         setStats(updatedStats);
-        if (user && cloudReady) {
-          void saveCloudStats(user.uid, updatedStats);
-        }
         modalTimerRef.current = window.setTimeout(() => {
           setIsResultsOpen(true);
           modalTimerRef.current = null;
@@ -360,15 +230,12 @@ export default function App() {
       updatedAt: Date.now(),
     };
 
-    updateActiveProgress(nextProgress, 'submit');
+    updateActiveProgress(nextProgress);
 
     if (isLoss) {
       setSelectedTiles([]);
       const updatedStats = recordPuzzleCompletion(activePuzzle.id, false);
       setStats(updatedStats);
-      if (user && cloudReady) {
-        void saveCloudStats(user.uid, updatedStats);
-      }
       modalTimerRef.current = window.setTimeout(() => {
         setIsResultsOpen(true);
         modalTimerRef.current = null;
@@ -377,12 +244,10 @@ export default function App() {
   }, [
     activeProgress,
     activePuzzle,
-    cloudReady,
     selectedTiles,
     showToast,
     triggerShake,
     updateActiveProgress,
-    user,
   ]);
 
   const solvedGroups = useMemo(() => {
@@ -406,14 +271,10 @@ export default function App() {
     <div className="min-h-screen flex flex-col bg-[#FAF8F5] text-[#1C1917]">
       <Header
         isTodaySelected={isTodaySelected}
-        user={user}
-        authLoading={authLoading}
         onSelectToday={() => handleSelectPuzzle(todayPuzzle.id)}
         onOpenArchive={() => setIsArchiveOpen(true)}
         onOpenRules={() => setIsRulesOpen(true)}
         onOpenStats={() => setIsResultsOpen(true)}
-        onSignIn={handleSignIn}
-        onSignOut={handleSignOut}
       />
 
       <main className="flex-1 w-full max-w-4xl mx-auto px-4 sm:px-6 py-6 sm:py-10">
@@ -484,9 +345,7 @@ export default function App() {
       </main>
 
       <footer className="border-t border-[#E5E0D8] py-5 px-4 text-center text-xs text-[#78716C]">
-        {user
-          ? `Spine & Seek · A daily bookish connections puzzle · Synced as ${user.email || user.displayName || 'Google Reader'}`
-          : 'Spine & Seek · A daily bookish connections puzzle'}
+        Spine &amp; Seek · A daily bookish connections puzzle · Progress saved locally in your browser
       </footer>
 
       <ResultsModal
